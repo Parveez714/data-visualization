@@ -29,129 +29,19 @@ def match_code_blocks(llm_response: str) -> str:
         return match.group(1).strip()
     return ""
 
-def execute_code_locally(code: str, df: pd.DataFrame, dataset_path: str = "./dataset.csv") -> Dict[str, Any]:
-    """
-    Executes generated Python data science code locally, capturing stdout, figures, and dataframe results.
-    """
-    stdout_buf = io.StringIO()
-    stderr_buf = io.StringIO()
-    images = []
-    table_data = None
-    
-    # Reset matplotlib state
-    plt.close('all')
-    sns.set_theme(style="whitegrid", palette="muted")
-    
-    # Custom matplotlib hook to capture plot outputs
-    exec_globals = {
-        "pd": pd,
-        "np": np,
-        "plt": plt,
-        "sns": sns,
-        "df": df.copy(),
-        "dataset_path": dataset_path,
-        "__builtins__": __builtins__,
-    }
-    
-    # Support pd.read_csv / pd.read_excel returning our dataframe if file doesn't exist on disk
-    original_read_csv = pd.read_csv
-    def safe_read_csv(filepath_or_buffer, *args, **kwargs):
-        if isinstance(filepath_or_buffer, str) and (filepath_or_buffer == dataset_path or os.path.basename(filepath_or_buffer) == os.path.basename(dataset_path)):
-            if os.path.exists(filepath_or_buffer):
-                return original_read_csv(filepath_or_buffer, *args, **kwargs)
-            return df.copy()
-        return original_read_csv(filepath_or_buffer, *args, **kwargs)
 
-    exec_globals["pd"].read_csv = safe_read_csv
-
-    try:
-        with contextlib.redirect_stdout(stdout_buf), contextlib.redirect_stderr(stderr_buf):
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                exec(code, exec_globals)
-        
-        # Capture all open matplotlib figures
-        fig_nums = plt.get_fignums()
-        for num in fig_nums:
-            fig = plt.figure(num)
-            fig.tight_layout()
-            buf = BytesIO()
-            fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
-            buf.seek(0)
-            img_base64 = base64.b64encode(buf.read()).decode("utf-8")
-            images.append({
-                "type": "image/png",
-                "base64": img_base64
-            })
-            plt.close(fig)
-            
-    except Exception as e:
-        stderr_buf.write(f"Execution error: {str(e)}\n")
-    finally:
-        pd.read_csv = original_read_csv
-        plt.close('all')
-
-    stdout_str = stdout_buf.getvalue().strip()
-    stderr_str = stderr_buf.getvalue().strip()
-    
-    return {
-        "stdout": stdout_str,
-        "stderr": stderr_str,
-        "images": images,
-        "table_data": table_data
-    }
-
-def execute_in_e2b(e2b_api_key: str, code: str, dataset_path: str, df: pd.DataFrame) -> Tuple[List[Dict[str, Any]], str, str]:
-    """
-    Executes code in E2B sandbox.
-    """
-    try:
-        from e2b_code_interpreter import Sandbox
-        images = []
-        stdout = ""
-        stderr = ""
-        
-        with Sandbox(api_key=e2b_api_key) as sandbox:
-            # Write dataset to sandbox
-            csv_buffer = io.StringIO()
-            df.to_csv(csv_buffer, index=False)
-            sandbox.files.write(dataset_path, csv_buffer.getvalue())
-            
-            exec_res = sandbox.run_code(code)
-            
-            if exec_res.error:
-                stderr = str(exec_res.error)
-            
-            for res in exec_res.results:
-                if hasattr(res, 'png') and res.png:
-                    images.append({
-                        "type": "image/png",
-                        "base64": res.png
-                    })
-                elif hasattr(res, 'figure'):
-                    fig = res.figure
-                    buf = BytesIO()
-                    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
-                    buf.seek(0)
-                    images.append({
-                        "type": "image/png",
-                        "base64": base64.b64encode(buf.read()).decode("utf-8")
-                    })
-            if hasattr(exec_res, 'logs') and exec_res.logs:
-                stdout = "\n".join(getattr(exec_res.logs, 'stdout', []))
-                
-        return images, stdout, stderr
-    except Exception as err:
-        return [], "", f"E2B Sandbox error: {str(err)}"
 
 def call_gemini_llm(
     api_key: str,
     model_name: str,
     system_prompt: str,
-    query: str
-) -> str:
+    query: str,
+    tools: Optional[List[Dict[str, Any]]] = None
+) -> Tuple[str, Optional[Dict[str, Any]]]:
     """
-    Calls Google Gemini API using the Generative Language REST endpoint with automatic model fallback.
+    Calls Google Gemini API using the Generative Language REST endpoint with automatic model fallback
+    and support for function / MCP tool calling.
+    Returns (text_response, tool_call_dict)
     """
     requested_id = model_name.split("/")[-1].strip() if model_name else "gemini-2.5-flash"
     candidate_models = [requested_id, "gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
@@ -163,7 +53,7 @@ def call_gemini_llm(
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent?key={api_key}"
         prompt_text = f"{system_prompt}\n\nUser Question / Query:\n{query}"
         
-        payload = {
+        payload: Dict[str, Any] = {
             "contents": [
                 {
                     "role": "user",
@@ -175,6 +65,9 @@ def call_gemini_llm(
                 "maxOutputTokens": 4096
             }
         }
+        
+        if tools:
+            payload["tools"] = [{"function_declarations": tools}]
         
         req = urllib.request.Request(
             url,
@@ -189,9 +82,18 @@ def call_gemini_llm(
                 candidates = resp_data.get("candidates", [])
                 if candidates:
                     parts = candidates[0].get("content", {}).get("parts", [])
-                    if parts:
-                        return parts[0].get("text", "")
-                return ""
+                    extracted_text = ""
+                    tool_call = None
+                    for part in parts:
+                        if "text" in part:
+                            extracted_text += part["text"] + "\n"
+                        if "functionCall" in part:
+                            tool_call = {
+                                "name": part["functionCall"].get("name"),
+                                "args": part["functionCall"].get("args", {})
+                            }
+                    return extracted_text.strip(), tool_call
+                return "", None
         except urllib.error.HTTPError as he:
             error_body = he.read().decode('utf-8', errors='ignore')
             last_error = f"Gemini API HTTP Error {he.code} on {model_id}: {error_body}"
@@ -204,7 +106,7 @@ def call_gemini_llm(
             
     if last_error:
         raise RuntimeError(last_error)
-    return ""
+    return "", None
 
 def is_id_column(col_name: str) -> bool:
     """Helper to detect if a column is an ID, Key, Index, Date, or non-aggregatable identifier rather than a metric."""
@@ -1234,18 +1136,24 @@ plt.show()
         
     return code, explanation
 
+from chart_mcp import (
+    GEMINI_CHART_TOOLS,
+    TOGETHER_CHART_TOOLS,
+    handle_chart_mcp_tool_call,
+    execute_create_chart_from_dataset
+)
+
 def run_agent_analysis(
     query: str,
     df: pd.DataFrame,
     dataset_name: str = "dataset.csv",
     gemini_api_key: Optional[str] = None,
     together_api_key: Optional[str] = None,
-    e2b_api_key: Optional[str] = None,
     model_name: str = "gemini-2.5-flash"
 ) -> Dict[str, Any]:
     """
     Main entry point for running data visualization AI agent.
-    Prioritizes Gemini API (from .env or parameter), then Together AI, then local heuristic engine.
+    Utilizes declarative Custom MCP Tools for structured chart rendering (zero sandbox overhead).
     """
     dataset_path = f"./{dataset_name}"
     
@@ -1254,7 +1162,8 @@ def run_agent_analysis(
     images = []
     stdout = ""
     stderr = ""
-    model_used = "Smart Visualization Engine"
+    model_used = "MCP Visualization Engine"
+    chart_spec = None
     
     # Check for Gemini API key (passed directly or from env)
     active_gemini_key = gemini_api_key or os.getenv("GEMINI_API_KEY", "")
@@ -1272,7 +1181,7 @@ def run_agent_analysis(
     except Exception:
         sample_rows = df.head(3).to_string()
         
-    system_prompt = f"""You are an elite Python Data Scientist, Business Intelligence Analyst, and Data Visualization Expert.
+    system_prompt = f"""You are an elite Business Intelligence Analyst and Data Visualization Expert.
 You have access to a dataset at '{dataset_path}' with the following schema:
 {schema_info}
 
@@ -1282,56 +1191,44 @@ Sample Data:
 PRE-COMPUTED DATASET SUMMARY & METRIC AGGREGATIONS:
 {rich_stats_summary}
 
+CHART CREATION VIA MCP TOOLS:
+You have access to custom MCP chart tools:
+1. `create_chart_from_dataset`: Recommended tool! Specify `chart_type` ('bar', 'line', 'pie', 'doughnut', 'scatter'), `title`, `x_column`, `y_column`, and `aggregation` ('count', 'sum', 'mean', 'min', 'max').
+2. `render_chart`: Alternatively provide explicit `labels` and `datasets` data arrays.
+
 CRITICAL RULES FOR AI INSIGHTS & EXPLANATIONS:
 1. VALUABLE & DATA-DRIVEN INSIGHTS: Output concrete statistical facts, exact numbers, currency amounts, percentages, segment names, and business takeaways from the pre-computed summary.
-2. NEVER OUTPUT META-DESCRIPTIONS OR PLACEHOLDERS: NEVER say 'Evaluated metric X segmented by Y' or 'Highlighted top contributing categories to uncover distribution drivers' or 'Categorical Performance Breakdown: Metric...'. Every point MUST contain real data values and numbers.
-3. EXECUTIVE STRUCTURE: Output strictly 3 to 5 scannable markdown bullet points starting with:
+2. EXECUTIVE STRUCTURE: Output strictly 3 to 5 scannable markdown bullet points starting with:
    • **Executive Summary**: [Direct numerical answer with total/mean metric value and key conclusion]
    • **Top Performer & Share**: [Top category/segment with exact numbers and % share of total]
    • **Runner-up & Disparity**: [Second and lowest segments with exact values and comparison gap]
    • **Concentration & Distribution**: [Concentration ratio of top segments or spread/variance]
    • **Strategic Recommendation**: [Data-backed actionable conclusion for business stakeholders]
-4. NO ID COLUMNS AS METRICS: NEVER calculate, average, or plot ID columns, Index keys, or Postal codes (e.g. Order ID, Customer ID, Row ID, Postal Code) as numeric metrics.
-5. PYTHON VISUALIZATION CODE: Provide a clean, self-contained Python code block enclosed in ```python ... ``` that reads '{dataset_path}' using `pd.read_csv('{dataset_path}')` and uses `matplotlib.pyplot` or `seaborn` to generate high-contrast, informative visualizations.
-6. Call `plt.show()` to render the plot.
-7. NEVER include raw Python code, code snippets, or console log dumps in your text explanation.
+3. NO ID COLUMNS AS METRICS: NEVER calculate, average, or plot ID columns, Index keys, or Postal codes as numeric metrics.
 """
 
-    # 1. Try Google Gemini if key available and model is Gemini or default
+    # 1. Try Google Gemini with MCP Tools
     if active_gemini_key and (model_name.startswith("gemini") or not active_together_key):
         try:
             target_model = model_name if model_name.startswith("gemini") else "gemini-2.0-flash"
-            raw_response = call_gemini_llm(active_gemini_key.strip(), target_model, system_prompt, query)
-            python_code = match_code_blocks(raw_response)
-            llm_explanation = clean_explanation_text(raw_response)
-            model_used = f"Google {target_model}"
+            raw_text, tool_call = call_gemini_llm(
+                api_key=active_gemini_key.strip(),
+                model_name=target_model,
+                system_prompt=system_prompt,
+                query=query,
+                tools=GEMINI_CHART_TOOLS
+            )
+            
+            if tool_call and tool_call.get("name"):
+                chart_spec = handle_chart_mcp_tool_call(tool_call["name"], tool_call.get("args", {}), df)
+                
+            llm_explanation = clean_explanation_text(raw_text)
+            model_used = f"Google {target_model} (MCP)"
         except Exception as gemini_err:
             stderr = f"Google Gemini API error: {str(gemini_err)}"
-            # Fallback to Together AI if available, else heuristic
-            if active_together_key:
-                try:
-                    from together import Together
-                    client = Together(api_key=active_together_key.strip())
-                    response = client.chat.completions.create(
-                        model="meta-llama/Meta-Llama-3.1-405B-Instruct-Turbo",
-                        messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": query}
-                        ],
-                    )
-                    raw_response = response.choices[0].message.content
-                    python_code = match_code_blocks(raw_response)
-                    llm_explanation = clean_explanation_text(raw_response)
-                    model_used = "Meta-Llama 3.1 405B (Together AI)"
-                except Exception as tog_err:
-                    python_code, fallback_exp = generate_heuristic_analysis(query, df, dataset_path)
-                    llm_explanation = clean_explanation_text(fallback_exp)
-            else:
-                python_code, fallback_exp = generate_heuristic_analysis(query, df, dataset_path)
-                llm_explanation = clean_explanation_text(fallback_exp)
 
-    # 2. Try Together AI if specified
-    elif active_together_key:
+    # 2. Try Together AI with MCP Tools if specified or fallback
+    if not chart_spec and active_together_key:
         try:
             from together import Together
             target_model = model_name if not model_name.startswith("gemini") else "meta-llama/Meta-Llama-3.1-405B-Instruct-Turbo"
@@ -1342,52 +1239,59 @@ CRITICAL RULES FOR AI INSIGHTS & EXPLANATIONS:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": query}
                 ],
+                tools=TOGETHER_CHART_TOOLS,
+                tool_choice="auto"
             )
-            raw_response = response.choices[0].message.content
-            python_code = match_code_blocks(raw_response)
+            choice = response.choices[0]
+            if choice.message.tool_calls:
+                tc = choice.message.tool_calls[0]
+                fn_name = tc.function.name
+                fn_args = json.loads(tc.function.arguments or "{}")
+                chart_spec = handle_chart_mcp_tool_call(fn_name, fn_args, df)
+            
+            raw_response = choice.message.content or ""
             llm_explanation = clean_explanation_text(raw_response)
-            model_used = target_model
-        except Exception as e:
-            stderr = f"Together AI error: {str(e)}"
-            python_code, fallback_exp = generate_heuristic_analysis(query, df, dataset_path)
-            llm_explanation = clean_explanation_text(fallback_exp)
+            model_used = f"{target_model} (MCP)"
+        except Exception as tog_err:
+            stderr = f"Together AI error: {str(tog_err)}"
 
-    # 3. Fallback to Local Heuristic Engine
-    else:
-        python_code, llm_explanation = generate_heuristic_analysis(query, df, dataset_path)
-        llm_explanation = clean_explanation_text(llm_explanation)
-        model_used = "Smart Visualization Engine (Local)"
-
-    # If code was not generated, fallback to heuristic
-    if not python_code.strip():
+    # 3. Fallback to Local Heuristic Chart MCP Engine
+    if not chart_spec:
         fallback_code, fallback_exp = generate_heuristic_analysis(query, df, dataset_path)
-        python_code = fallback_code
-        if not llm_explanation.strip():
+        if not llm_explanation:
             llm_explanation = clean_explanation_text(fallback_exp)
+        
+        # Build structured chartSpec heuristically
+        metric_cols = [c for c in df.select_dtypes(include=[np.number]).columns if not is_id_column(c)]
+        cat_cols = [c for c in df.select_dtypes(include=['object', 'category', 'string']).columns if not is_id_column(c)]
+        
+        x_target = find_best_matching_column(cat_cols, query.lower()) or (cat_cols[0] if cat_cols else df.columns[0])
+        y_target = find_best_matching_column(metric_cols, query.lower(), ["profit", "sales", "revenue", "amount", "total", "margin", "quantity"]) if metric_cols else None
+        
+        agg_choice = "sum" if any(w in query.lower() for w in ["total", "sum", "sales", "revenue", "amount"]) else ("mean" if any(w in query.lower() for w in ["avg", "average", "mean"]) else "count")
+        
+        chart_type = "line" if any(w in query.lower() for w in ["trend", "month", "time", "date"]) else ("pie" if any(w in query.lower() for w in ["pie", "proportion", "share"]) else "bar")
+        
+        chart_spec = execute_create_chart_from_dataset(df, {
+            "chart_type": chart_type,
+            "title": f"{agg_choice.capitalize()} of {y_target or 'Records'} by {x_target}",
+            "x_column": x_target,
+            "y_column": y_target,
+            "aggregation": agg_choice if y_target else "count",
+            "top_n": 10
+        })
+        model_used = "MCP Visualization Engine (Local)"
 
-    # If explanation is still empty or too short, generate data-backed heuristic explanation
+    # Ensure explanation is filled
     if not llm_explanation or len(llm_explanation.strip()) < 30:
         _, fallback_exp = generate_heuristic_analysis(query, df, dataset_path)
         llm_explanation = clean_explanation_text(fallback_exp)
 
-    # 4. Execute Code (E2B sandbox if key given, otherwise safe local execution)
-    if e2b_api_key and e2b_api_key.strip():
-        e2b_images, e2b_stdout, e2b_stderr = execute_in_e2b(e2b_api_key.strip(), python_code, dataset_path, df)
-        images = e2b_images
-        stdout = e2b_stdout
-        if e2b_stderr:
-            stderr = (stderr + "\n" + e2b_stderr).strip()
-    else:
-        local_res = execute_code_locally(python_code, df, dataset_path)
-        images = local_res["images"]
-        stdout = local_res["stdout"]
-        if local_res["stderr"]:
-            stderr = (stderr + "\n" + local_res["stderr"]).strip()
-            
     return {
         "query": query,
         "explanation": clean_explanation_text(llm_explanation),
         "code": python_code,
+        "chartSpec": chart_spec,
         "images": images,
         "stdout": stdout,
         "stderr": stderr,

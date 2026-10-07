@@ -17,7 +17,6 @@ export default function ApiSettingsModal({
 }) {
   const [geminiKey, setGeminiKey] = useState(settings.geminiApiKey || '');
   const [togetherKey, setTogetherKey] = useState(settings.togetherApiKey || '');
-  const [e2bKey, setE2bKey] = useState(settings.e2bApiKey || '');
   const [model, setModel] = useState(settings.modelName || 'gemini-2.5-flash');
   const [showKeys, setShowKeys] = useState(false);
   const [savedSuccess, setSavedSuccess] = useState(false);
@@ -67,7 +66,6 @@ export default function ApiSettingsModal({
     onSave({
       geminiApiKey: geminiKey.trim(),
       togetherApiKey: togetherKey.trim(),
-      e2bApiKey: e2bKey.trim(),
       modelName: model
     });
     setSavedSuccess(true);
@@ -203,30 +201,6 @@ export default function ApiSettingsModal({
             />
           </div>
 
-          {/* E2B API Key (Optional) */}
-          <div>
-            <div className="flex items-center justify-between mb-1.5">
-              <label className="text-xs font-bold text-[#09090B] uppercase tracking-wider">
-                E2B Code Interpreter Key (Optional)
-              </label>
-              <a
-                href="https://e2b.dev/docs/legacy/getting-started/api-key"
-                target="_blank"
-                rel="noreferrer"
-                className="text-[11px] text-black font-semibold hover:underline flex items-center gap-1"
-              >
-                Get E2B Key <ExternalLink className="w-3 h-3" />
-              </a>
-            </div>
-            <input
-              type={showKeys ? 'text' : 'password'}
-              value={e2bKey}
-              onChange={(e) => setE2bKey(e.target.value)}
-              placeholder="e.g. e2b_1234567890..."
-              className="w-full px-3.5 py-2.5 rounded-lg border border-[#E4E4E7] text-xs font-mono text-[#09090B] placeholder-zinc-400 focus:outline-none focus:border-black focus:ring-1 focus:ring-black bg-white"
-            />
-          </div>
-
           {/* Toggle Key Visibility */}
           <div className="flex items-center justify-between pt-1">
             <label className="flex items-center gap-2 cursor-pointer text-xs text-[#52525B]">
@@ -239,7 +213,7 @@ export default function ApiSettingsModal({
               Show API key values
             </label>
 
-            {(geminiKey || togetherKey || e2bKey) && (
+            {(geminiKey || togetherKey) && (
               <button
                 type="button"
                 onClick={() => {

@@ -13,6 +13,7 @@ import {
   Lightbulb
 } from 'lucide-react';
 import { API_BASE_URL } from '../config';
+import InteractiveChart from './InteractiveChart';
 
 export default function VisualizationStudio({
   datasets,
@@ -126,7 +127,6 @@ export default function VisualizationStudio({
         query: query.trim(),
         geminiApiKey: apiSettings.geminiApiKey || null,
         togetherApiKey: apiSettings.togetherApiKey || null,
-        e2bApiKey: apiSettings.e2bApiKey || null,
         modelName: apiSettings.modelName || 'gemini-2.5-flash'
       };
 
@@ -428,7 +428,46 @@ export default function VisualizationStudio({
             {/* 1. Chart View */}
             {activeView === 'chart' && (
               <div className="space-y-6">
-                {result.images && result.images.length > 0 ? (
+                {/* Dynamic MCP Chart or Legacy Static Image */}
+                {result.chartSpec ? (
+                  <div className="space-y-4">
+                    <InteractiveChart spec={result.chartSpec} />
+
+                    {/* Direct Analytical Insights under Chart */}
+                    {result.explanation && (
+                      <div className="p-4 rounded-xl border border-[#E4E4E7] bg-white text-xs text-[#09090B] leading-relaxed space-y-2">
+                        <div className="flex items-center gap-1.5 font-bold text-black">
+                          <Sparkles className="w-3.5 h-3.5 text-black" />
+                          <span>Direct Analytical Insights</span>
+                        </div>
+                        <div className="space-y-2 pt-1">
+                          {result.explanation.split('\n').filter(line => line.trim()).map((line, lIdx) => {
+                            const cleanLine = line.replace(/^[•\-\*]\s*/, '').trim();
+                            const boldMatch = cleanLine.match(/^\*\*([^*:]+)\*\*:\s*(.*)$/);
+                            if (boldMatch) {
+                              return (
+                                <div key={lIdx} className="flex items-start gap-2.5">
+                                  <span className="inline-block mt-0.5 px-2 py-0.5 rounded text-[10px] font-bold bg-black text-white whitespace-nowrap shrink-0">
+                                    {boldMatch[1]}
+                                  </span>
+                                  <span className="text-[#09090B] leading-relaxed">
+                                    {formatInlineMarkdown(boldMatch[2])}
+                                  </span>
+                                </div>
+                              );
+                            }
+                            return (
+                              <div key={lIdx} className="flex items-start gap-2 text-[#09090B]">
+                                <span className="text-black font-bold">•</span>
+                                <span>{formatInlineMarkdown(cleanLine)}</span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ) : result.images && result.images.length > 0 ? (
                   result.images.map((img, idx) => (
                     <div key={idx} className="space-y-3">
                       <div className="relative group rounded-xl overflow-hidden border border-[#E4E4E7] bg-zinc-50 p-3 flex items-center justify-center min-h-[380px]">
@@ -486,8 +525,8 @@ export default function VisualizationStudio({
                     </div>
                   ))
                 ) : (
-                  <div className="text-center py-12 text-zinc-500 text-xs">
-                    No image rendered. Please try another prompt or verify your dataset.
+                  <div className="p-12 text-center text-zinc-500 border border-dashed rounded-xl bg-zinc-50">
+                    No visualization available.
                   </div>
                 )}
               </div>

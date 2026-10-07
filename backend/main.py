@@ -41,7 +41,6 @@ class AnalyzeRequest(BaseModel):
     query: str
     geminiApiKey: Optional[str] = None
     togetherApiKey: Optional[str] = None
-    e2bApiKey: Optional[str] = None
     modelName: Optional[str] = "gemini-3.6-flash"
 
 @app.get("/")
@@ -250,7 +249,6 @@ def analyze_data(req: AnalyzeRequest):
         dataset_name=dataset_filename,
         gemini_api_key=req.geminiApiKey,
         together_api_key=req.togetherApiKey,
-        e2b_api_key=req.e2bApiKey,
         model_name=req.modelName or "gemini-2.5-flash"
     )
     
@@ -259,6 +257,7 @@ def analyze_data(req: AnalyzeRequest):
         "datasetId": req.datasetId,
         "query": req.query,
         "explanation": result["explanation"],
+        "chartSpec": result.get("chartSpec"),
         "code": result["code"],
         "images": result["images"],
         "stdout": result["stdout"],
@@ -266,7 +265,15 @@ def analyze_data(req: AnalyzeRequest):
         "modelUsed": result["modelUsed"]
     }
 
+@app.get("/api/mcp/tools")
+def get_mcp_tools():
+    from chart_mcp import GEMINI_CHART_TOOLS, TOGETHER_CHART_TOOLS
+    return {
+        "geminiTools": GEMINI_CHART_TOOLS,
+        "togetherTools": TOGETHER_CHART_TOOLS
+    }
+
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.getenv("PORT", "8002"))
+    port = int(os.getenv("PORT", "8005"))
     uvicorn.run(app, host="127.0.0.1", port=port)

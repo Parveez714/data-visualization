@@ -24,7 +24,6 @@ export default function App() {
     return {
       geminiApiKey: '',
       togetherApiKey: '',
-      e2bApiKey: '',
       modelName: 'gemini-2.5-flash'
     };
   });
@@ -108,7 +107,7 @@ export default function App() {
         onOpenSettings={() => setIsSettingsOpen(true)}
         selectedModel={apiSettings.modelName}
         backendStatus={backendStatus}
-        hasApiKeys={Boolean(apiSettings.geminiApiKey || apiSettings.togetherApiKey || apiSettings.e2bApiKey)}
+        hasApiKeys={Boolean(apiSettings.geminiApiKey || apiSettings.togetherApiKey)}
       />
 
       {/* Main Content Area */}
